@@ -8,7 +8,7 @@ public class ActionPlanProcessorTests
 {
     private IServiceProvider _provider = null!;
 
-    [SetUp]
+    [OneTimeSetUp]
     public void SetUp()
     {
         var services = new ServiceCollection();
@@ -29,7 +29,7 @@ public class ActionPlanProcessorTests
         _provider = services.BuildServiceProvider();
     }
 
-    [TearDown]
+    [OneTimeTearDown]
     public void TearDown()
     {
         if (_provider is IDisposable disposable)
@@ -44,7 +44,7 @@ public class ActionPlanProcessorTests
         var processor = _provider.GetRequiredService<IActionPlanProcessor>();
 
         var entry = new ConfigEntry("app.settings.theme", "DarkMode");
-        var outcome = await processor.ProcessAsync(new[] { entry });
+        var outcome = await processor.ProcessAsync([entry]);
 
         Assert.That(outcome.Results, Has.Exactly(1).Items);
         var result = outcome.Results.Single();
@@ -59,7 +59,7 @@ public class ActionPlanProcessorTests
         var processor = _provider.GetRequiredService<IActionPlanProcessor>();
 
         var entry = new ConfigEntry("database.connection.port", "90000");
-        var outcome = await processor.ProcessAsync(new[] { entry });
+        var outcome = await processor.ProcessAsync([entry]);
 
         Assert.That(outcome.Results, Is.Empty);
         Assert.That(outcome.Diagnostics, Has.Some.Matches<Diagnostic>(
@@ -72,9 +72,22 @@ public class ActionPlanProcessorTests
         var processor = _provider.GetRequiredService<IActionPlanProcessor>();
 
         var entry = new ConfigEntry("features.experimental-ui", "yes");
-        var outcome = await processor.ProcessAsync(new[] { entry });
+        var outcome = await processor.ProcessAsync([entry]);
 
         Assert.That(outcome.Diagnostics, Is.Empty);
         Assert.That(outcome.Results.Single().Value, Is.EqualTo(new FeatureFlagOptions(true)));
+    }
+
+    [Test]
+    public async Task Process_UnmatchedNode_ProducesDiagnostic()
+    {
+        var processor = _provider.GetRequiredService<IActionPlanProcessor>();
+
+        var entry = new ConfigEntry("unmatched.node", "value");
+        var outcome = await processor.ProcessAsync([entry]);
+
+        Assert.That(outcome.Results, Is.Empty);
+        Assert.That(outcome.Diagnostics, Has.Some.Matches<Diagnostic>(
+            d => d.NodeKey == entry.Key && d.Code == "POLICY_MISSING"));
     }
 }

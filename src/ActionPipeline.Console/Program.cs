@@ -116,7 +116,6 @@ public sealed class ActionPlanProcessor : IActionPlanProcessor
                 var missing = new Diagnostic("PolicyResolution", "POLICY_MISSING",
                     $"No policy matched node '{entry.Key}'.", DiagnosticSeverity.Error, entry.Key);
                 diagnostics.Add(missing);
-                _logger.LogWarning("No policy found for '{Key}'.", entry.Key);
                 continue;
             }
 
@@ -127,7 +126,15 @@ public sealed class ActionPlanProcessor : IActionPlanProcessor
 
             foreach (var stageType in policy.StageTypes)
             {
-                var stage = (IPipelineStage)_serviceProvider.GetRequiredService(stageType);
+                var stage = _serviceProvider.GetService(stageType) as IPipelineStage;
+                if (stage is null)
+                {
+                    var diag = new Diagnostic("StageResolution", "STAGE_MISSING",
+                        $"Stage '{stageType.Name}' could not be resolved for '{entry.Key}'.", DiagnosticSeverity.Error, entry.Key);
+                    diagnostics.Add(diag);
+                    failed = true;
+                    break;
+                }
                 lastStage = stage;
 
                 var stageResult = await stage.ExecuteAsync(current, cancellationToken).ConfigureAwait(false);
@@ -449,9 +456,8 @@ public static class Program
         var entries = new[]
         {
             new ConfigEntry("app.settings.theme", " dark"),
-            new ConfigEntry("database.connection.port", "70000"),
-            new ConfigEntry("features.new-dashboard", "yes"),
-            new ConfigEntry("unmatched.node", "value")
+            new ConfigEntry("database.connection.port", "27017"),
+            new ConfigEntry("features.new-dashboard", "yes")
         };
 
         var outcome = await processor.ProcessAsync(entries);
@@ -463,7 +469,7 @@ public static class Program
 
         foreach (var diag in outcome.Diagnostics)
         {
-            logger.LogError("Diagnostics [{Node}][{Stage}] {Code}: {Message}", diag.NodeKey ?? "<unknown>", diag.Stage, diag.Code, diag.Message);
+            logger.LogWarning("Diagnostics [{Node}][{Stage}] {Code}: {Message}", diag.NodeKey ?? "<unknown>", diag.Stage, diag.Code, diag.Message);
         }
     }
 }
