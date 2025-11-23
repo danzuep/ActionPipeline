@@ -1,3 +1,4 @@
 <Solution>
   <Project Path="ActionPipeline.Console/ActionPipeline.Console.csproj" />
+  <Project Path="ActionPipeline.Tests/ActionPipeline.Tests.csproj" Id="5532acca-b299-4c7f-a0ca-1a346565e82e" />
 </Solution>
