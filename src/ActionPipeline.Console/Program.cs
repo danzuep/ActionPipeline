@@ -1,287 +1,183 @@
-﻿using System.Collections;
+﻿using System.Globalization;
+using ActionPipeline;
+using Microsoft.Extensions.Logging;
 
-namespace ActionPipeline
+public interface IInputHandler
 {
-    public class ConfigurationNode
-    {
-        public string Path { get; }
-        public object Value { get; set; }
-        public List<ConfigurationNode> Children { get; } = new();
+    bool TryHandle(KeyValuePair<string, string> input, out object? parsedValue);
+}
 
-        public ConfigurationNode(string path, object value)
+public interface ITransformationStrategy
+{
+    object? Transform(object? value);
+}
+
+public class StringValueHandler : IInputHandler
+{
+    public bool TryHandle(KeyValuePair<string, string> input, out object? parsedValue)
+    {
+        var trimmed = input.Value?.Trim();
+        parsedValue = trimmed;
+        return trimmed is not null;
+    }
+}
+
+public class NumericValueHandler : IInputHandler
+{
+    public bool TryHandle(KeyValuePair<string, string> input, out object? parsedValue)
+    {
+        parsedValue = null;
+        if (long.TryParse(input.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var longValue))
         {
-            Path = path;
-            Value = value;
+            parsedValue = longValue;
+            return true;
         }
 
-        public void AddChild(ConfigurationNode child) => Children.Add(child);
+        if (double.TryParse(input.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var doubleValue))
+        {
+            parsedValue = doubleValue;
+            return true;
+        }
+
+        return false;
+    }
+}
+
+public class BooleanValueHandler : IInputHandler
+{
+    public bool TryHandle(KeyValuePair<string, string> input, out object? parsedValue)
+    {
+        if (bool.TryParse(input.Value?.Trim(), out var boolValue))
+        {
+            parsedValue = boolValue;
+            return true;
+        }
+
+        parsedValue = null;
+        return false;
+    }
+}
+
+public class LowercaseStrategy : ITransformationStrategy
+{
+    public object? Transform(object? value)
+    {
+        return value switch
+        {
+            string s => s.ToLowerInvariant(),
+            _ => value
+        };
+    }
+}
+
+public class ActionPlan
+{
+    private readonly List<IInputHandler> _handlers = new();
+    private readonly List<ITransformationStrategy> _transformations = new();
+    private readonly List<Func<KeyValuePair<string, object?>, ValidationResult>> _validators = new();
+    private readonly IEnumerable<KeyValuePair<string, string>> _inputs;
+
+    public ActionPlan(IEnumerable<KeyValuePair<string, string>> inputs)
+    {
+        _inputs = inputs ?? throw new ArgumentNullException(nameof(inputs));
     }
 
-    public class ConfigurationNodeIterator : IEnumerable<ConfigurationNode>
+    public ActionPlan AddHandler(IInputHandler handler)
     {
-        private readonly ConfigurationNode _root;
+        _handlers.Add(handler);
+        return this;
+    }
 
-        public ConfigurationNodeIterator(ConfigurationNode root) => _root = root;
+    public ActionPlan AddTransformation(ITransformationStrategy transformation)
+    {
+        _transformations.Add(transformation);
+        return this;
+    }
 
-        public IEnumerator<ConfigurationNode> GetEnumerator()
+    public ActionPlan AddFluentValidation(Action<FluentValidationBuilder> configure)
+    {
+        var builder = new FluentValidationBuilder();
+        configure(builder);
+        _validators.AddRange(builder.Build());
+        return this;
+    }
+
+    public IReadOnlyList<KeyValuePair<string, object?>> Apply()
+    {
+        var results = new List<KeyValuePair<string, object?>>();
+
+        foreach (var input in _inputs)
         {
-            var stack = new Stack<ConfigurationNode>();
-            stack.Push(_root);
-
-            while (stack.Count > 0)
+            foreach (var handler in _handlers)
             {
-                var node = stack.Pop();
-                yield return node;
-                for (var i = node.Children.Count - 1; i >= 0; i--)
-                    stack.Push(node.Children[i]);
-            }
-        }
-
-        IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
-    }
-
-    public interface IValueHandler
-    {
-        void Handle(ConfigurationNode node);
-        IValueHandler SetNext(IValueHandler next);
-    }
-
-    public abstract class ValueHandlerBase : IValueHandler
-    {
-        protected IValueHandler Next;
-
-        public IValueHandler SetNext(IValueHandler next)
-        {
-            Next = next;
-            return next;
-        }
-
-        public void Handle(ConfigurationNode node)
-        {
-            if (CanHandle(node.Value))
-                Process(node);
-            else
-                Next?.Handle(node);
-        }
-
-        protected abstract bool CanHandle(object value);
-        protected abstract void Process(ConfigurationNode node);
-    }
-
-    public class StringValueHandler : ValueHandlerBase
-    {
-        protected override bool CanHandle(object value) => value is string;
-        protected override void Process(ConfigurationNode node)
-        {
-            if (node.Value is string s)
-                node.Value = s.Trim();
-        }
-    }
-
-    public class DictionaryValueHandler : ValueHandlerBase
-    {
-        protected override bool CanHandle(object value) => value is IDictionary<string, object>;
-        protected override void Process(ConfigurationNode node)
-        {
-            if (node.Value is IDictionary<string, object> dict)
-            {
-                node.Children.AddRange(ConfigurationParser.ParseDictionary(dict, node.Path));
-            }
-        }
-    }
-
-    public interface IValueTransformationStrategy
-    {
-        object Transform(object value);
-    }
-
-    public class UppercaseStrategy : IValueTransformationStrategy
-    {
-        public object Transform(object value) => value is string s ? s.ToUpperInvariant() : value;
-    }
-
-    public class MultiplyStrategy : IValueTransformationStrategy
-    {
-        private readonly int _factor;
-        public MultiplyStrategy(int factor) => _factor = factor;
-
-        public object Transform(object value) => value is int i ? i * _factor : value;
-    }
-
-    public interface IConfigurationAction
-    {
-        void Execute(ConfigurationNode node);
-    }
-
-    public class ValidateCommand : IConfigurationAction
-    {
-        private readonly Func<ConfigurationNode, bool> _predicate;
-        private readonly string _errorMessage;
-
-        public ValidateCommand(Func<ConfigurationNode, bool> predicate, string errorMessage)
-        {
-            _predicate = predicate;
-            _errorMessage = errorMessage;
-        }
-
-        public void Execute(ConfigurationNode node)
-        {
-            if (!_predicate(node))
-                throw new InvalidOperationException($"Validation failed for {node.Path}: {_errorMessage}");
-        }
-    }
-
-    public class TransformCommand : IConfigurationAction
-    {
-        private readonly IEnumerable<IValueTransformationStrategy> _strategies;
-
-        public TransformCommand(IEnumerable<IValueTransformationStrategy> strategies)
-        {
-            _strategies = strategies;
-        }
-
-        public void Execute(ConfigurationNode node)
-        {
-            foreach (var strategy in _strategies)
-                node.Value = strategy.Transform(node.Value);
-        }
-    }
-
-    public class PersistCommand : IConfigurationAction
-    {
-        private readonly IDictionary<string, object> _store;
-
-        public PersistCommand(IDictionary<string, object> store) => _store = store;
-
-        public void Execute(ConfigurationNode node)
-        {
-            if (node.Children.Count == 0)
-                _store[node.Path] = node.Value;
-        }
-    }
-
-    public class ConfigurationActionVisitor
-    {
-        private readonly IEnumerable<IConfigurationAction> _actions;
-
-        public ConfigurationActionVisitor(IEnumerable<IConfigurationAction> actions) => _actions = actions;
-
-        public void Visit(ConfigurationNode node)
-        {
-            foreach (var action in _actions)
-                action.Execute(node);
-        }
-    }
-
-    public class ActionPlanBuilder
-    {
-        private readonly List<IConfigurationAction> _actions = new();
-
-        public ActionPlanBuilder AddValidation(Func<ConfigurationNode, bool> predicate, string errorMessage)
-        {
-            _actions.Add(new ValidateCommand(predicate, errorMessage));
-            return this;
-        }
-
-        public ActionPlanBuilder AddTransformation(params IValueTransformationStrategy[] strategies)
-        {
-            _actions.Add(new TransformCommand(strategies));
-            return this;
-        }
-
-        public ActionPlanBuilder AddPersistence(IDictionary<string, object> store)
-        {
-            _actions.Add(new PersistCommand(store));
-            return this;
-        }
-
-        public ConfigurationActionVisitor Build() => new(_actions);
-    }
-
-    public static class ConfigurationParser
-    {
-        public static IEnumerable<ConfigurationNode> ParseDictionary(
-            IDictionary<string, object> dict,
-            string prefix = "")
-        {
-            var nodes = new List<ConfigurationNode>();
-
-            foreach (var kvp in dict)
-            {
-                var path = string.IsNullOrWhiteSpace(prefix) ? kvp.Key : $"{prefix}.{kvp.Key}";
-                var node = new ConfigurationNode(path, kvp.Value);
-                nodes.Add(node);
-
-                if (kvp.Value is IDictionary<string, object> childDict)
+                if (handler.TryHandle(input, out var parsedValue))
                 {
-                    var children = ParseDictionary(childDict, path);
-                    foreach (var child in children)
-                        node.AddChild(child);
+                    var kvp = new KeyValuePair<string, object?>(input.Key, parsedValue);
+                    if (_validators.All(validate => validate(kvp).IsValid))
+                    {
+                        var transformed = _transformations.Aggregate(parsedValue, (current, transformer) => transformer.Transform(current));
+                        results.Add(new KeyValuePair<string, object?>(input.Key, transformed));
+                    }
+
+                    break;
                 }
             }
-
-            return nodes;
         }
 
-        public static ConfigurationNode BuildTree(IDictionary<string, object> flatInput)
-        {
-            var root = new ConfigurationNode("root", flatInput);
-            foreach (var node in ParseDictionary(flatInput))
-                root.AddChild(node);
-            return root;
-        }
+        return results;
+    }
+}
 
-        public static IReadOnlyList<ConfigurationNode> Flatten(ConfigurationNode root, bool includeRoot = false)
-        {
-            var flattened = new List<ConfigurationNode>();
-            foreach (var node in new ConfigurationNodeIterator(root))
-            {
-                if (includeRoot || node != root)
-                    flattened.Add(node);
-            }
-            return flattened;
-        }
+public class FluentValidationBuilder
+{
+    private readonly List<Func<KeyValuePair<string, object?>, ValidationResult>> _rules = new();
+
+    public FluentValidationBuilder AddRule(
+        Func<KeyValuePair<string, object?>, bool> predicate,
+        string errorMessage)
+    {
+        _rules.Add(kvp => predicate(kvp)
+            ? ValidationResult.Success
+            : ValidationResult.Fail(errorMessage));
+
+        return this;
     }
 
-    public class Program
+    public IReadOnlyList<Func<KeyValuePair<string, object?>, ValidationResult>> Build() => _rules;
+}
+
+public readonly record struct ValidationResult(bool IsValid, string? Message)
+{
+    public static ValidationResult Success => new(true, null);
+    public static ValidationResult Fail(string message) => new(false, message);
+}
+
+public class Program
+{
+    public static void Main()
     {
-        public static void Main()
+        var logger = DefaultLogger.Instance;
+
+        var input = new List<KeyValuePair<string, string>>
         {
-            var input = new Dictionary<string, object>
-            {
-                ["database.connection.username"] = " admin ",
-                ["database.connection.port"] = 5432,
-                ["featureFlags"] = new Dictionary<string, object>
-                {
-                    ["beta"] = true,
-                    ["maxUsers"] = 150
-                }
-            };
+            new("app.settings.theme", " Dark "),
+            new("database.connection.port", "5432"),
+            new("featureFlags.beta", "true")
+        };
 
-            var root = ConfigurationParser.BuildTree(input);
+        var results = new ActionPlan(input)
+            .AddFluentValidation(builder => builder
+                .AddRule(kvp => !string.IsNullOrWhiteSpace(kvp.Value?.ToString()), "Value cannot be empty"))
+            .AddHandler(new StringValueHandler())
+            .AddHandler(new NumericValueHandler())
+            .AddHandler(new BooleanValueHandler())
+            .AddTransformation(new LowercaseStrategy())
+            .Apply();
 
-            var nodes = ConfigurationParser.Flatten(root); // flattened once, reused everywhere
-
-            var stringHandler = new StringValueHandler();
-            var dictHandler = new DictionaryValueHandler();
-            stringHandler.SetNext(dictHandler);
-
-            foreach (var node in nodes)
-                stringHandler.Handle(node); // single enumeration
-
-            var store = new Dictionary<string, object>();
-            var plan = new ActionPlanBuilder()
-                .AddValidation(node => node.Path != "database.connection.port" || (int)node.Value > 1024, "Port must be > 1024")
-                .AddTransformation(new UppercaseStrategy(), new MultiplyStrategy(2))
-                .AddPersistence(store)
-                .Build();
-
-            foreach (var node in nodes) // same flattened list reused
-                plan.Visit(node);
-
-            Console.WriteLine("Final persisted values:");
-            foreach (var kvp in store)
-                Console.WriteLine($"{kvp.Key} = {kvp.Value}");
+        logger.LogInformation("Final values:");
+        foreach (var kvp in results)
+        {
+            logger.LogInformation($"{kvp.Key} = {kvp.Value}");
         }
     }
 }
